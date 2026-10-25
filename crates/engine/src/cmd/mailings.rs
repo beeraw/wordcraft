@@ -522,7 +522,17 @@ fn insert_field(s: &mut Session, instr: &str, placeholder: &str) -> CmdResult {
 }
 
 /// Parse CSV (RFC 4180-ish: quotes, doubled quotes, commas/semicolons/tabs).
-pub fn parse_csv(text: &str) -> Vec<Vec<String>> {
+///
+/// A list is held to the budget a spreadsheet's is (`wordcraft_formats::sheet`) while it is read,
+/// not after, so a hostile file can't make it build gigabytes before it is cut (#4053): a record
+/// wider than `max_cols`, more cells than `MAX_CELLS` (the records times the widest record, which
+/// is what the list costs once its records are padded) or more cell text than `MAX_TEXT_BYTES`
+/// refuses the list.
+pub fn parse_csv(text: &str, max_cols: usize) -> Result<Vec<Vec<String>>, CmdError> {
+    use wordcraft_formats::sheet::{MAX_CELLS, MAX_TEXT_BYTES};
+    let too_wide = || CmdError::Failed(format!("a row of the list has more than {max_cols} columns, the most it can have"));
+    let too_many = || CmdError::Failed(format!("the list has more than {MAX_CELLS} cells (rows times columns), the most it can have"));
+    let too_long = || CmdError::Failed(format!("the list has more than {} MB of text, the most it can have", MAX_TEXT_BYTES >> 20));
     let first = text.lines().next().unwrap_or("");
     let mut quoted = false;
     let mut unquoted = String::new();
@@ -534,49 +544,71 @@ pub fn parse_csv(text: &str) -> Vec<Vec<String>> {
         }
     }
     let sep = [',', ';', '\t'].into_iter().max_by_key(|c| unquoted.matches(*c).count()).unwrap_or(',');
-    let mut rows = Vec::new();
+    let mut rows: Vec<Vec<String>> = Vec::new();
     let mut row = Vec::new();
     let mut cell = String::new();
+    let (mut widest, mut text_bytes) = (0usize, 0usize);
     let mut q = false;
     let mut chars = text.chars().peekable();
+    let mut add = |cell: &mut String, c: char| {
+        text_bytes = text_bytes.saturating_add(c.len_utf8());
+        if text_bytes > MAX_TEXT_BYTES {
+            return Err(too_long());
+        }
+        cell.push(c);
+        Ok(())
+    };
+    let end_cell = |row: &mut Vec<String>, cell: &mut String| {
+        if row.len() >= max_cols {
+            return Err(too_wide());
+        }
+        row.push(std::mem::take(cell));
+        Ok(())
+    };
+    let mut end_record = |rows: &mut Vec<Vec<String>>, row: &mut Vec<String>| {
+        if row.iter().all(String::is_empty) {
+            row.clear();
+            return Ok(());
+        }
+        widest = widest.max(row.len());
+        if rows.len().saturating_add(1).saturating_mul(widest) > MAX_CELLS {
+            return Err(too_many());
+        }
+        rows.push(std::mem::take(row));
+        Ok(())
+    };
     while let Some(c) = chars.next() {
         if q {
             if c == '"' {
                 if chars.peek() == Some(&'"') {
-                    cell.push('"');
+                    add(&mut cell, '"')?;
                     chars.next();
                 } else {
                     q = false;
                 }
             } else {
-                cell.push(c);
+                add(&mut cell, c)?;
             }
         } else if c == '"' {
             q = true;
         } else if c == sep {
-            row.push(std::mem::take(&mut cell));
+            end_cell(&mut row, &mut cell)?;
         } else if c == '\n' || c == '\r' {
             if c == '\r' && chars.peek() == Some(&'\n') {
                 chars.next();
             }
-            row.push(std::mem::take(&mut cell));
-            if row.iter().any(|x| !x.is_empty()) {
-                rows.push(std::mem::take(&mut row));
-            } else {
-                row.clear();
-            }
+            end_cell(&mut row, &mut cell)?;
+            end_record(&mut rows, &mut row)?;
         } else {
-            cell.push(c);
+            add(&mut cell, c)?;
         }
-        if rows.len() > 100_000 {
-            break;
+        if rows.len() > MAX_RECORDS {
+            return Ok(rows);
         }
     }
-    row.push(cell);
-    if row.iter().any(|x| !x.is_empty()) {
-        rows.push(row);
-    }
-    rows
+    end_cell(&mut row, &mut cell)?;
+    end_record(&mut rows, &mut row)?;
+    Ok(rows)
 }
 
 /// Most records and fields a recipient list keeps.
@@ -629,7 +661,7 @@ fn recipients(s: &mut Session, v: &Value) -> CmdResult {
         table_from_rows(v.get("fields").and_then(Value::as_array), arr)?
     } else {
         let all = if let Some(c) = p::str(v, "csv") {
-            parse_csv(c)
+            parse_csv(c, MAX_FIELDS)?
         } else {
             let (bytes, ext) = if let Some(d) = p::str(v, "data") {
                 let b = super::insert::base64_decode(d.trim()).ok_or_else(|| CmdError::Params("`data` isn't valid base64".into()))?;
@@ -686,7 +718,7 @@ fn recipients(s: &mut Session, v: &Value) -> CmdResult {
                 sheet = json!(chosen);
                 rows
             } else {
-                parse_csv(&decode(&bytes, v)?)
+                parse_csv(&decode(&bytes, v)?, MAX_FIELDS)?
             }
         };
         header_split(all, p::bool(v, "headers").unwrap_or(true))?
@@ -1496,9 +1528,9 @@ mod tests {
 
     #[test]
     fn csv_parsing() {
-        let r = parse_csv("Name,City\n\"Smith, Ann\",Paris\r\nBo,\"Oslo \"\"N\"\"\"\n\n");
+        let r = parse_csv("Name,City\n\"Smith, Ann\",Paris\r\nBo,\"Oslo \"\"N\"\"\"\n\n", MAX_FIELDS).unwrap();
         assert_eq!(r, vec![vec!["Name", "City"], vec!["Smith, Ann", "Paris"], vec!["Bo", "Oslo \"N\""]]);
-        assert_eq!(parse_csv("a;b\n1;2")[1], vec!["1", "2"]);
+        assert_eq!(parse_csv("a;b\n1;2", MAX_FIELDS).unwrap()[1], vec!["1", "2"]);
     }
 
     /// #4001: finishing a merge opens a new document, with a new undo history. It is not an
@@ -1542,8 +1574,52 @@ mod tests {
 
     #[test]
     fn csv_delimiter_ignores_quoted_text() {
-        let r = parse_csv("\"Name, first, last\";City\nAnn;Paris\n");
+        let r = parse_csv("\"Name, first, last\";City\nAnn;Paris\n", MAX_FIELDS).unwrap();
         assert_eq!(r, vec![vec!["Name, first, last", "City"], vec!["Ann", "Paris"]]);
+    }
+
+    /// #4053: a record as wide as the limit is kept; one column more refuses the list while it is
+    /// read, before a string is built for every separator.
+    #[test]
+    fn csv_column_limit_is_kept_while_reading() {
+        let at_limit = format!("a{}", ",".repeat(MAX_FIELDS - 1));
+        assert_eq!(parse_csv(&at_limit, MAX_FIELDS).unwrap()[0].len(), MAX_FIELDS);
+        let err = parse_csv(&",".repeat(MAX_FIELDS), MAX_FIELDS).unwrap_err().to_string();
+        assert!(err.contains("more than 1000 columns"), "{err}");
+    }
+
+    /// #4053: the records times the widest record (the padded list's size) is held to the
+    /// spreadsheet path's cell budget.
+    #[test]
+    fn csv_cell_limit_counts_padded_records() {
+        use wordcraft_formats::sheet::MAX_CELLS;
+        let header = format!("a{}", ",a".repeat(MAX_FIELDS - 1));
+        let records = MAX_CELLS / MAX_FIELDS;
+        let fits = format!("{header}{}", "\nx".repeat(records - 1));
+        assert_eq!(parse_csv(&fits, MAX_FIELDS).unwrap().len(), records);
+        let err = parse_csv(&format!("{fits}\nx"), MAX_FIELDS).unwrap_err().to_string();
+        assert!(err.contains("cells"), "{err}");
+    }
+
+    /// #4053: cell text is held to the spreadsheet path's text budget.
+    #[test]
+    fn csv_text_limit_is_kept() {
+        use wordcraft_formats::sheet::MAX_TEXT_BYTES;
+        let err = parse_csv(&"a".repeat(MAX_TEXT_BYTES + 1), MAX_FIELDS).unwrap_err().to_string();
+        assert!(err.contains("MB of text"), "{err}");
+    }
+
+    /// #4053: Select Recipients refuses an over-wide list and keeps the one it had; Insert
+    /// Spreadsheet holds a list to the 63 columns a table has.
+    #[test]
+    fn over_wide_csv_is_refused_by_the_commands() {
+        let mut s = Session::new(Document::new());
+        s.run("mailings.recipients", &json!({"csv": "Name\nAda"})).unwrap();
+        assert!(s.run("mailings.recipients", &json!({"csv": ",".repeat(MAX_FIELDS)})).is_err());
+        assert_eq!(s.merge.headers, vec!["Name"], "the previous list is kept");
+        let wide = |n: usize| format!("a{}", ",a".repeat(n - 1));
+        assert!(s.run("insert.spreadsheet", &json!({"csv": wide(64)})).is_err());
+        s.run("insert.spreadsheet", &json!({"csv": wide(63)})).unwrap();
     }
 
     #[test]
