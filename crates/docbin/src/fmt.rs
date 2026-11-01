@@ -281,8 +281,9 @@ fn change_tabs(p: &mut ParaProps, prl: &Prl) {
     at += 1;
     let mut removed: Vec<f32> = Vec::with_capacity(del);
     for k in 0..del {
-        // A position removed twice leaves one `Clear` stop.
-        if let Some(x) = i16_at(at + 2 * k).filter(|x| !removed.iter().any(|r| (r - x).abs() <= 0.05)) {
+        // A position removed twice leaves one `Clear` stop; positions a twip apart stay apart,
+        // since each removes the stops within its own 25 twips.
+        if let Some(x) = i16_at(at + 2 * k).filter(|x| !removed.iter().any(|r| r.to_bits() == x.to_bits())) {
             removed.push(x);
         }
     }

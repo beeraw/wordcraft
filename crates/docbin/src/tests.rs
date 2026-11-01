@@ -2102,6 +2102,21 @@ fn tab_removals_at_the_cap_keep_their_clear_stops() {
     assert_eq!(clear, [25.0], "the removed stop is hidden, the unmatched removal is dropped");
 }
 
+/// Removals a twip apart are not merged: only the one at 75 twips is within 25 twips of the
+/// stop at 100, and it still removes it after a removal at 74.
+#[test]
+fn tab_removals_a_twip_apart_each_apply() {
+    use wordcraft_doc::props::TabAlign;
+    let mut para = wordcraft_doc::props::ParaProps::default();
+    for papx in [grpprl(&[(0xC60D, &tabs_papx(&[], &[(0, 0), (100, 0)]))]), grpprl(&[(0xC60D, &tabs_papx(&[74, 75], &[]))])] {
+        for prl in crate::sprm::iter(&papx) {
+            crate::fmt::apply_para(&mut para, &prl);
+        }
+    }
+    let stops: Vec<(f32, TabAlign)> = para.tabs.iter().flatten().map(|t| (t.pos, t.align)).collect();
+    assert_eq!(stops, [(0.0, TabAlign::Left), (3.7, TabAlign::Clear), (3.75, TabAlign::Clear)]);
+}
+
 /// The cycle guard of the base chain: a style based on itself, three styles based on each other,
 /// and a chain deeper than `MAX_STYLE_DEPTH` (16) all resolve, each style applied once.
 #[test]
