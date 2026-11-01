@@ -2103,7 +2103,7 @@ fn many_tab_sprms_in_a_base_style_read_in_bounded_time() {
     let mut raw = vec![raw_style(0x0FFF, "Normal", papx)];
     raw.extend((1..4096).map(|i| raw_style(0, &format!("Style {i}"), grpprl(&[(0xC60D, &tabs_papx(&[], &[(30_000, 0)]))]))));
     let started = std::time::Instant::now();
-    let sheet = crate::fmt::stylesheet(&raw, &["Calibri".to_string()]);
+    let sheet = crate::fmt::stylesheet(&raw, &["Calibri".to_string()], Default::default());
     assert!(started.elapsed() < std::time::Duration::from_secs(10), "{:?}", started.elapsed());
     assert_eq!(sheet.styles.len(), 4096);
     for s in &sheet.styles {
@@ -2125,7 +2125,7 @@ fn style_tab_stops_inherit_down_the_chain() {
         raw_style(4, "A", tabs(&[(2880, 0)], &[])),
         raw_style(3, "B", tabs(&[(4320, 0)], &[])),
     ];
-    let sheet = crate::fmt::stylesheet(&raw, &["Calibri".to_string()]);
+    let sheet = crate::fmt::stylesheet(&raw, &["Calibri".to_string()], Default::default());
     let stops = |name: &str| {
         let s = sheet.styles.iter().find(|s| s.name == name).expect(name);
         s.para.tabs.iter().flatten().map(|t| (t.pos, t.align)).collect::<Vec<_>>()
@@ -2203,7 +2203,7 @@ fn style_base_cycles_and_deep_chains_resolve() {
     raw.push(raw_style(41, "Y", stop(12_000)));
     raw.push(raw_style(42, "Z", stop(13_000)));
     let started = std::time::Instant::now();
-    let sheet = crate::fmt::stylesheet(&raw, &["Calibri".to_string()]);
+    let sheet = crate::fmt::stylesheet(&raw, &["Calibri".to_string()], Default::default());
     assert!(started.elapsed() < std::time::Duration::from_secs(10), "{:?}", started.elapsed());
     let stops = |name: &str| {
         let s = sheet.styles.iter().find(|s| s.name == name).expect(name);
