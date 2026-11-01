@@ -2085,6 +2085,23 @@ fn ten_thousand_tab_sprms_in_a_paragraph_keep_64_stops() {
     assert_eq!(stops, (0..64).map(|s| s as f32 * 3.0 / 20.0).collect::<Vec<_>>(), "the first 64 stops");
 }
 
+/// At 64 stops, a removal that hits a stop keeps its `Clear` stop even after an unmatched
+/// removal, and a position removed twice leaves one `Clear` stop.
+#[test]
+fn tab_removals_at_the_cap_keep_their_clear_stops() {
+    let full: Vec<(i16, u8)> = (0..64).map(|k| (k * 100, 0)).collect();
+    let mut para = wordcraft_doc::props::ParaProps::default();
+    for papx in [grpprl(&[(0xC60D, &tabs_papx(&[], &full))]), grpprl(&[(0xC60D, &tabs_papx(&[-2000, 500, 500], &[]))])] {
+        for prl in crate::sprm::iter(&papx) {
+            crate::fmt::apply_para(&mut para, &prl);
+        }
+    }
+    let tabs = para.tabs.unwrap_or_default();
+    assert_eq!(tabs.len(), 64);
+    let clear: Vec<f32> = tabs.iter().filter(|t| t.align == wordcraft_doc::props::TabAlign::Clear).map(|t| t.pos).collect();
+    assert_eq!(clear, [25.0], "the removed stop is hidden, the unmatched removal is dropped");
+}
+
 /// The cycle guard of the base chain: a style based on itself, three styles based on each other,
 /// and a chain deeper than `MAX_STYLE_DEPTH` (16) all resolve, each style applied once.
 #[test]

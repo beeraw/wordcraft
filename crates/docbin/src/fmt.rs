@@ -279,9 +279,10 @@ fn change_tabs(p: &mut ParaProps, prl: &Prl) {
     let Some(&del) = op.get(at) else { return };
     let del = usize::from(del.min(64));
     at += 1;
-    let mut removed = Vec::with_capacity(del);
+    let mut removed: Vec<f32> = Vec::with_capacity(del);
     for k in 0..del {
-        if let Some(x) = i16_at(at + 2 * k) {
+        // A position removed twice leaves one `Clear` stop.
+        if let Some(x) = i16_at(at + 2 * k).filter(|x| !removed.iter().any(|r| (r - x).abs() <= 0.05)) {
             removed.push(x);
         }
     }
@@ -291,7 +292,11 @@ fn change_tabs(p: &mut ParaProps, prl: &Prl) {
     at += 1;
     let mut tabs = p.tabs.take().unwrap_or_default();
     // Removed within 25 twips (1.25 pt), as the format says.
-    tabs.retain(|t| !removed.iter().any(|x| (t.pos - x).abs() <= 1.25));
+    let removes = |x: &f32, t: &TabStop| (t.pos - x).abs() <= 1.25;
+    // At the cap, the `Clear` stops of removals that hit a stop of this list come first: an
+    // unmatched removal must not take the slot of one that hides an inherited stop.
+    removed.sort_by_key(|x| !tabs.iter().any(|t| removes(x, t)));
+    tabs.retain(|t| !removed.iter().any(|x| removes(x, t)));
     for x in removed {
         if tabs.len() >= MAX_TABS {
             break;
